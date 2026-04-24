@@ -97,6 +97,7 @@ def enforce_schema(df: pd.DataFrame) -> pd.DataFrame:
 # ── 1. Simulator ──────────────────────────────────────────────────────────────
 try:
     sim = pd.read_json("sentinel_training_data.jsonl", lines=True)
+    sim["source"] = "simulator"
     print(f"  Simulator:         {len(sim):>9,} rows")
     dataframes.append(sim)
 except:
@@ -122,6 +123,9 @@ try:
     if "source" not in alchemy.columns:
         alchemy["source"] = "alchemy_real"
 
+    if "amount" in alchemy.columns and "amount_usd" not in alchemy.columns:
+        alchemy["amount_usd"] = alchemy["amount"] * 2800
+        
     dataframes.append(alchemy)
 
 except Exception as e:

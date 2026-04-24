@@ -36,7 +36,7 @@ CHECKS = [
     # ── Fraud labels ──────────────────────────────────────────────────────────
     {
         "name": "Fraud edges exist",
-        "query": "MATCH ()-[r:SENT_TO]->() WHERE r.`is_fraud:int` = 1 RETURN count(r) AS c",
+        "query": "MATCH ()-[r:SENT_TO]->() WHERE r.`is_fraud` = true RETURN count(r) AS c",
         "assert": lambda r: r["c"] > 0,
         "message": "No fraud edges found — is_fraud may not be loading correctly.",
     },
@@ -44,7 +44,7 @@ CHECKS = [
         "name": "Fraud rate is reasonable (1–10%)",
         "query": """
             MATCH ()-[r:SENT_TO]->()
-            RETURN toFloat(sum(CASE WHEN r.`is_fraud:int` = 1 THEN 1 ELSE 0 END)) / count(r) AS rate
+            RETURN toFloat(sum(CASE WHEN r.`is_fraud` = true THEN 1 ELSE 0 END)) / count(r) AS rate
         """,
         "assert": lambda r: 0.005 < r["rate"] < 0.15,
         "message": "Fraud rate outside expected range. Check FIAT_FRAUD_RATE in simulator.",
