@@ -2,3 +2,7 @@ data
 mlruns
 models
 *.jsonl
+initial_models
+initial_models_2
+models*
+ray_results

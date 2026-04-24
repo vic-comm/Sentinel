@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import ray
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -75,13 +75,13 @@ except ImportError:
 
 class Config:
     SCRIPT_DIR    = Path(__file__).parent.absolute()
-    TRAIN_PATH    = SCRIPT_DIR / "data/training/train.parquet"
-    VAL_PATH      = SCRIPT_DIR / "data/training/val.parquet"
-    TEST_PATH     = SCRIPT_DIR / "data/training/test.parquet"
-    ARTIFACTS_DIR = SCRIPT_DIR / "models"
-    CACHE_DIR     = SCRIPT_DIR / "cache"
-    RAY_RESULTS   = SCRIPT_DIR / "ray_results"
-
+    PROJECT_ROOT  = SCRIPT_DIR.parent
+    TRAIN_PATH    = PROJECT_ROOT / "data/training/train.parquet"
+    VAL_PATH      = PROJECT_ROOT / "data/training/val.parquet"
+    TEST_PATH     = PROJECT_ROOT / "data/training/test.parquet"
+    ARTIFACTS_DIR = PROJECT_ROOT / "models"
+    CACHE_DIR     = PROJECT_ROOT / "cache"
+    RAY_RESULTS   = PROJECT_ROOT / "ray_results"
     RANDOM_STATE    = 42
     EXPERIMENT_NAME = "sentinel_fraud_detection"
     REGISTRY_NAME   = "sentinel_fraud_classifier"
@@ -96,16 +96,73 @@ class Config:
     # at 2.5% fraud rate, missing fraud (FN) costs more than a false alarm (FP)
     BETA_SCORE = 2
 
+    # DROP_COLS: List[str] = [
+    #     "transaction_id", "sender_hash", "receiver_hash", "identity_hash",
+    #     "user_email_hash", "sender_wallet_hash", "receiver_wallet_hash",
+    #     "sender_device_hash", "sender_ip_hash", "transaction_hash",
+    #     "fraud_network_id", "cross_modality_fraud_id", "linked_fiat_transaction",
+    #     "timestamp",
+    #     "fraud_type",
+    #     "source", "source_address", "source_label",
+    #     "elliptic_feature_2", "elliptic_feature_3", "elliptic_feature_4",
+    #     "cross_modality_pattern",
+    #     "known_mixer_interaction", 
+    #     "immediate_withdrawal",
+    #     "is_first_time_receiver",
+    #     "transfer_network",
+    #     "is_unusual_hour",
+    #     "node", 
+    #     "entity", 
+    #     "entity_base", 
+    #     "entity_cluster", 
+    #     "amount_bucket", 
+    #     "hour",
+    #     "amount_usd",
+    #     "hour_of_day",
+    #     "transfer_type_ach"
+    #     "amount_crypto",          
+    # "amount_ratio",
+    # "velocity_ratio",
+    # "velocity_baseline_daily",
+    # "balance_drain_ratio",
+    # "count_1h",
+    # "count_6h",
+    # "count_24h",
+    # "count_7d",
+    # "sum_amount_1h",
+    # "sum_amount_24h",
+    # "sum_amount_7d",
+    # "sender_balance_before",  # Leak: Reconstructs amount_usd
+    # "sender_balance_after",   # Leak: Reconstructs amount_usd
+    # "immediate_withdrawal",   # Leak: 100% correlated to phishing/bridges
+    # "known_mixer_interaction",# Leak: 100% correlated to mixer fraud     
+    # "is_unusual_hour",        # Leak: Proxy for hour_of_day
+    # "day_of_week",
+    # "is_weekend",
+    # ]
+
     DROP_COLS: List[str] = [
+        # --- 1. Identifiers & Hashes (Never train on these) ---
         "transaction_id", "sender_hash", "receiver_hash", "identity_hash",
         "user_email_hash", "sender_wallet_hash", "receiver_wallet_hash",
         "sender_device_hash", "sender_ip_hash", "transaction_hash",
+        
+        # --- 2. Ground Truth & Labels (Target Leakage) ---
         "fraud_network_id", "cross_modality_fraud_id", "linked_fiat_transaction",
-        "timestamp",
-        "fraud_type",
-        "source", "source_address", "source_label",
+        "fraud_type", "cross_modality_pattern",
+        
+        # --- 3. Metadata & Strings ---
+        "timestamp", "source", "source_address", "source_label",
+        
+        # --- 4. Pipeline/Graph Artifacts ---
+        "node", "entity", "entity_base", "entity_cluster", "amount_bucket", "hour",
+        
+        # --- 5. Elliptic Raw Features (Keep out for tabular purity) ---
         "elliptic_feature_2", "elliptic_feature_3", "elliptic_feature_4",
-        "cross_modality_pattern",
+        
+        # --- 6. The Last Two Binary Cheat Codes ---
+        "immediate_withdrawal",    # Highly correlated with simulator phishing
+        "known_mixer_interaction", # We want GraphSAGE to find this, not XGBoost
     ]
 
     CAT_COLS: List[str] = [
@@ -248,9 +305,10 @@ class DataPreparator:
             out = df.copy()
             for col in cat_present:
                 if col in out.columns:
-                    out[col] = out[col].fillna("missing").astype(str)
+                    # Cast to object first to break the Categorical restriction
+                    out[col] = out[col].astype(object).fillna("missing").astype(str)
             return out.fillna(-1)
-
+        
         X_train_cat = _make_cat_version(X_train)
         X_val_cat   = _make_cat_version(X_val)
         X_test_cat  = _make_cat_version(X_test)
@@ -263,9 +321,19 @@ class DataPreparator:
         X_val   = X_val.reindex(columns=X_train.columns,  fill_value=0)
         X_test  = X_test.reindex(columns=X_train.columns, fill_value=0)
 
+        bool_map = {True: 1, False: 0, "True": 1, "False": 0, "true": 1, "false": 0}
+        X_train = X_train.replace(bool_map)
+        X_val   = X_val.replace(bool_map)
+        X_test  = X_test.replace(bool_map)
+
         X_train = X_train.fillna(-1)
         X_val   = X_val.fillna(-1)
         X_test  = X_test.fillna(-1)
+
+        # ── BULLETPROOFING: Drop any lingering text columns ──
+        X_train = X_train.select_dtypes(exclude=['object', 'string', 'category'])
+        X_val   = X_val.select_dtypes(exclude=['object', 'string', 'category'])
+        X_test  = X_test.select_dtypes(exclude=['object', 'string', 'category'])
 
         print(f"  [features] Encoded: {X_train.shape[1]} cols | "
               f"Raw: {X_train_cat.shape[1]} cols | "
@@ -339,29 +407,66 @@ class MetricsCalculator:
         plt.close()
         return path
 
-    @staticmethod
-    def log_feature_importance(model, model_name, feature_names, save_dir, top_n=20):
-        if hasattr(model, "feature_importances_"):
-            importances = model.feature_importances_
-        elif hasattr(model, "coef_"):
-            coef = model.coef_
-            importances = np.mean(np.abs(coef), axis=0) if coef.ndim == 2 else np.abs(coef)
-        else:
-            return None
-        fi = (pd.DataFrame({"feature": feature_names, "importance": importances})
-              .sort_values("importance", ascending=False).head(top_n))
-        plt.figure(figsize=(10, 6))
-        plt.barh(fi["feature"][::-1], fi["importance"][::-1])
-        plt.xlabel("Importance")
-        plt.title(f"Top {top_n} Features — {model_name}")
-        plt.tight_layout()
-        plot_path = save_dir / f"feature_importance_{model_name}.png"
-        csv_path  = save_dir / f"feature_importance_{model_name}.csv"
-        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
-        plt.close()
-        fi.to_csv(csv_path, index=False)
-        return plot_path, csv_path
+    # @staticmethod
+    # def log_feature_importance(model, model_name, feature_names, save_dir, top_n=20):
+    #     if hasattr(model, "feature_importances_"):
+    #         importances = model.feature_importances_
+    #     elif hasattr(model, "coef_"):
+    #         coef = model.coef_
+    #         importances = np.mean(np.abs(coef), axis=0) if coef.ndim == 2 else np.abs(coef)
+    #     else:
+    #         return None
+    #     fi = (pd.DataFrame({"feature": feature_names, "importance": importances})
+    #           .sort_values("importance", ascending=False).head(top_n))
+    #     plt.figure(figsize=(10, 6))
+    #     plt.barh(fi["feature"][::-1], fi["importance"][::-1])
+    #     plt.xlabel("Importance")
+    #     plt.title(f"Top {top_n} Features — {model_name}")
+    #     plt.tight_layout()
+    #     plot_path = save_dir / f"feature_importance_{model_name}.png"
+    #     csv_path  = save_dir / f"feature_importance_{model_name}.csv"
+    #     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    #     plt.close()
+    #     fi.to_csv(csv_path, index=False)
+    #     return plot_path, csv_path
 
+    def log_feature_importance(self, model, model_type, feature_names: list, top_n: int = 20):
+        """Extracts and logs feature importance. Handles model-specific extraction."""
+        importances = None
+        
+        # Dynamically align feature names with the model's actual inputs
+        if model_type == ModelType.XGBOOST:
+            importances = model.feature_importances_
+            # XGBoost stores the exact feature names it saw during training
+            if hasattr(model, "feature_names_in_"):
+                feature_names = model.feature_names_in_.tolist()
+        elif model_type == ModelType.LIGHTGBM:
+            importances = model.feature_importances_
+            if hasattr(model, "feature_name_"):
+                feature_names = model.feature_name_
+        elif model_type == ModelType.CATBOOST:
+            importances = model.get_feature_importance()
+            if hasattr(model, "feature_names_"):
+                feature_names = model.feature_names_
+        else: # Logistic
+            if hasattr(model, "coef_"):
+                importances = np.abs(model.coef_[0])
+                if hasattr(model, "feature_names_in_"):
+                    feature_names = model.feature_names_in_.tolist()
+
+        if importances is None or len(importances) != len(feature_names):
+            print("  ⚠️ Warning: Could not align feature importances with feature names. Skipping MLflow logging.")
+            return pd.DataFrame() # Fail gracefully
+
+        fi = (pd.DataFrame({"feature": feature_names, "importance": importances})
+              .sort_values("importance", ascending=False)
+              .head(top_n))
+
+        if not fi.empty:
+            mlflow.log_dict(fi.to_dict("records"), f"{model_type.value}_feature_importance.json")
+            
+        return fi
+    
     @staticmethod
     def run_shap(model, X_val, model_type, save_dir, n_samples=2000):
         try:
@@ -395,7 +500,7 @@ class MetricsCalculator:
 class HyperparameterOptimizer:
     """Sequential Optuna search. Used when --use-ray is not set."""
 
-    SAMPLE_SIZE = 100_000   # rows used per trial — full data used only for final fit
+    SAMPLE_SIZE = 200_000   # rows used per trial — full data used only for final fit
 
     def __init__(self, config: Config):
         self.config = config
@@ -457,6 +562,10 @@ class HyperparameterOptimizer:
             pr_auc = average_precision_score(y_val, model.predict_proba(X_val.values)[:, 1])
             mlflow.log_metric("trial_pr_auc", pr_auc)
             self._log_trial("xgboost", trial.number, pr_auc)
+            y_prob = model.predict_proba(X_val)[:, 1]
+            if np.std(y_prob) < 1e-6:   # all predictions identical
+                return 0.0               # degenerate — don't log as valid trial
+            pr_auc = average_precision_score(y_val, y_prob)
             return -pr_auc
         return objective
 
@@ -470,7 +579,7 @@ class HyperparameterOptimizer:
                 "num_leaves":        trial.suggest_int("num_leaves",         20, 300),
                 "subsample":         trial.suggest_float("subsample",        0.5, 1.0),
                 "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.5, 1.0),
-                "min_child_samples": trial.suggest_int("min_child_samples",  5, 100),
+                "min_child_samples": trial.suggest_int("min_child_samples",  5, 50),
                 "reg_alpha":         trial.suggest_float("reg_alpha",        1e-8, 10.0, log=True),
                 "reg_lambda":        trial.suggest_float("reg_lambda",       1e-8, 10.0, log=True),
                 "is_unbalance":      True,
@@ -514,6 +623,10 @@ class HyperparameterOptimizer:
             pr_auc = average_precision_score(y_val, model.predict_proba(X_val)[:, 1])
             mlflow.log_metric("trial_pr_auc", pr_auc)
             self._log_trial("catboost", trial.number, pr_auc)
+            y_prob = model.predict_proba(X_val)[:, 1]
+            if np.std(y_prob) < 1e-6:   # all predictions identical
+                return 0.0               # degenerate — don't log as valid trial
+            pr_auc = average_precision_score(y_val, y_prob)
             return -pr_auc
         return objective
 
@@ -535,6 +648,10 @@ class HyperparameterOptimizer:
             pr_auc = average_precision_score(y_val, model.predict_proba(X_val.values)[:, 1])
             mlflow.log_metric("trial_pr_auc", pr_auc)
             self._log_trial("logistic", trial.number, pr_auc)
+            y_prob = model.predict_proba(X_val)[:, 1]
+            if np.std(y_prob) < 1e-6:   # all predictions identical
+                return 0.0               # degenerate — don't log as valid trial
+            pr_auc = average_precision_score(y_val, y_prob)
             return -pr_auc
         return objective
 
@@ -602,10 +719,10 @@ def _build_ray_search_space(model_type: ModelType) -> dict:
 
 def _make_ray_trainable(
     model_type: ModelType,
-    X_train_np: np.ndarray,
-    y_train_np: np.ndarray,
-    X_val_np:   np.ndarray,
-    y_val_np:   np.ndarray,
+   X_train_id: "ray.ObjectRef",
+    y_train_id: "ray.ObjectRef",  
+    X_val_id:   "ray.ObjectRef",  
+    y_val_id:   "ray.ObjectRef",
     cat_indices: List[int],
     scale_pos_weight: float,
     random_state: int,
@@ -631,8 +748,15 @@ def _make_ray_trainable(
         import numpy as np
         import pandas as pd
         from sklearn.metrics import average_precision_score
+        import ray           
 
-        # Subsample for speed — each trial sees a different 100K-row slice
+        # ── 1. Retrieve arrays from shared memory FIRST ──
+        X_train_np = ray.get(X_train_id)
+        y_train_np = ray.get(y_train_id)
+        X_val_np   = ray.get(X_val_id)
+        y_val_np   = ray.get(y_val_id)
+
+        # ── 2. THEN Subsample for speed ──
         rng = np.random.default_rng(abs(hash(str(config))) % (2**32))
         n   = min(sample_size, len(X_train_np))
         idx = rng.choice(len(X_train_np), n, replace=False)
@@ -715,6 +839,7 @@ def _make_ray_trainable(
             pr_auc = float(average_precision_score(y_val_np, y_prob))
 
         except Exception as e:
+            print(f"\n[!] Ray Trial Failed: {e}\n")
             pr_auc = 0.0   # treat failed trials as worst-case
 
         ray_tune.report({"pr_auc": pr_auc})
@@ -767,18 +892,26 @@ class RayTuneOptimizer:
             col_names   = []
 
         # Convert to numpy once — passed to every Ray actor
-        X_train_np = X_train.values.astype(np.float32)
+        dtype_x = object if model_type == ModelType.CATBOOST else np.float32
+        
+        X_train_np = X_train.values.astype(dtype_x)
         y_train_np = data.y_train.values.astype(np.int32)
-        X_val_np   = X_val.values.astype(np.float32)
+        X_val_np   = X_val.values.astype(dtype_x)
         y_val_np   = data.y_val.values.astype(np.int32)
+        
+        # ── THE FIX: Put large arrays into the Ray Object Store ──
+        X_train_id = ray.put(X_train_np)
+        y_train_id = ray.put(y_train_np)
+        X_val_id   = ray.put(X_val_np)
+        y_val_id   = ray.put(y_val_np)
 
         search_space = _build_ray_search_space(model_type)
         trainable_fn = _make_ray_trainable(
             model_type       = model_type,
-            X_train_np       = X_train_np,
-            y_train_np       = y_train_np,
-            X_val_np         = X_val_np,
-            y_val_np         = y_val_np,
+            X_train_id       = X_train_id,
+            y_train_id       = y_train_id,
+            X_val_id         = X_val_id,
+            y_val_id         = y_val_id,
             cat_indices      = cat_indices,
             scale_pos_weight = data.scale_pos_weight,
             random_state     = self.config.RANDOM_STATE,
@@ -944,7 +1077,7 @@ class ModelTrainer:
             return opt.logistic_objective(X_tr, y_tr, X_v, y_v)
 
     # ── Final model: retrain on train+val, evaluate on test ──────────────────
-
+    @task(log_prints=True)
     def _train_final_model(
         self,
         model_type:  ModelType,
@@ -1033,23 +1166,124 @@ class ModelTrainer:
             })
             return Pipeline([("scaler", StandardScaler()),
                               ("clf",   LogisticRegression(**p))])
+        
+    # def _fit_model(self, model_type, model, X_tr, y_tr, X_val, y_val, data):
+    #     # Load sample weights
+    #     import numpy as np
+    #     from pathlib import Path
+    #     w_train_path = Path("data/training/sample_weights_train.npy")
+    #     w_val_path   = Path("data/training/sample_weights_val.npy")
+    #     w_train = np.load(w_train_path) if w_train_path.exists() else None
+    #     w_val   = np.load(w_val_path)   if w_val_path.exists()   else None
 
-    def _fit_model(self, model_type, model, X_tr, y_tr, X_v, y_v, data):
+    #     if model_type == ModelType.XGBOOST:
+    #         model.fit(
+    #             X_tr, y_tr, 
+    #             sample_weight=w_train,
+    #             eval_set=[(X_val, y_val)], 
+    #             sample_weight_eval_set=[w_val] if w_val is not None else None,
+    #             verbose=False
+    #         )
+            
+    #     elif model_type == ModelType.LIGHTGBM:
+    #         from lightgbm import early_stopping, log_evaluation
+    #         model.fit(
+    #             X_tr, y_tr,
+    #             sample_weight=w_train,
+    #             eval_set=[(X_val, y_val)],
+    #             callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+    #         )
+            
+    #     elif model_type == ModelType.CATBOOST:
+    #         from catboost import Pool
+            
+    #         cat_cols = getattr(data, 'cat_present', [])
+    #         if cat_cols:
+    #             valid_cat_cols = [c for c in cat_cols if c in X_tr.columns]
+    #             X_tr[valid_cat_cols] = X_tr[valid_cat_cols].astype(str)
+    #             X_val[valid_cat_cols] = X_val[valid_cat_cols].astype(str)
+    #         else:
+    #             valid_cat_cols = []
+                
+    #         train_pool = Pool(X_tr, y_tr, weight=w_train, cat_features=valid_cat_cols)
+    #         val_pool   = Pool(X_val, y_val, cat_features=valid_cat_cols)
+            
+    #         model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=50, verbose=False)
+            
+    #     else: # LOGISTIC
+    #         model.fit(X_tr, y_tr, clf__sample_weight=w_train)
+
+    def _fit_model(self, model_type, model, X_tr, y_tr, X_val, y_val, data):
+        """
+        Reads sample weights from the source_confidence column — same DataFrame,
+        always the same length as X_tr. Drops the column before training so it
+        never leaks as a feature.
+
+        This replaces the stale .npy file approach which caused the size mismatch:
+        h_weights.size() == batch.Size() (846820 vs. 1028282)
+        """
+        # Extract weights — guaranteed same shape as X_tr (same DataFrame)
+        w_train = None
+        w_val   = None
+        if "source_confidence" in X_tr.columns:
+            # FIX: fillna(0.001) ensures no zero-division and no NaNs
+            w_train = X_tr["source_confidence"].fillna(0.001).values.astype(np.float32)
+            train_mean = w_train.mean()
+            if train_mean > 0:
+                w_train = w_train / train_mean
+
+        if "source_confidence" in X_val.columns:
+            w_val = X_val["source_confidence"].fillna(0.001).values.astype(np.float32)
+            val_mean = w_val.mean()
+            if val_mean > 0:
+                w_val = w_val / val_mean
+
+        # Drop BEFORE passing to model — weight column must never be a feature
+        for df in [X_tr, X_val, getattr(data, "X_test", None), 
+                   getattr(data, "X_train_cat", None), getattr(data, "X_val_cat", None), getattr(data, "X_test_cat", None)]:
+            if df is not None and "source_confidence" in df.columns:
+                df.drop(columns=["source_confidence"], inplace=True, errors="ignore")
+
         if model_type == ModelType.XGBOOST:
-            model.fit(X_tr.values, y_tr.values,
-                      eval_set=[(X_v.values, y_v.values)], verbose=False)
+            model.fit(
+                X_tr.values, y_tr.values,
+                sample_weight=w_train,
+                eval_set=[(X_val.values, y_val.values)],
+                sample_weight_eval_set=[w_val] if w_val is not None else None,
+                verbose=False,
+            )
+
         elif model_type == ModelType.LIGHTGBM:
-            model.fit(X_tr, y_tr, eval_set=[(X_v, y_v)],
-                      callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)])
+            model.set_params(is_unbalance=True)
+            y_tr_int = y_tr.astype(int)
+            y_val_int = y_val.astype(int)
+
+            model.fit(
+                X_tr, y_tr_int,
+                sample_weight=w_train,
+                eval_set=[(X_val, y_val_int)],
+                callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)],
+            )
+            
+
         elif model_type == ModelType.CATBOOST:
             cat_indices = [data.X_train_cat.columns.tolist().index(c)
-                           for c in data.cat_feature_names
-                           if c in data.X_train_cat.columns]
-            model.fit(Pool(X_tr, y_tr, cat_features=cat_indices),
-                      eval_set=Pool(X_v, y_v, cat_features=cat_indices),
-                      early_stopping_rounds=50, verbose=False)
-        else:
-            model.fit(X_tr.values, y_tr.values)
+                        for c in data.cat_feature_names
+                        if c in data.X_train_cat.columns]
+            # X_tr and X_val here are already the cat versions (set in _train_final_model)
+            # Drop source_confidence from them too
+            X_tr_cat  = X_tr.drop(columns=["source_confidence"],  errors="ignore")
+            X_val_cat = X_val.drop(columns=["source_confidence"], errors="ignore")
+            train_pool = Pool(X_tr_cat,  y_tr.values,  weight=w_train, cat_features=cat_indices)
+            val_pool   = Pool(X_val_cat, y_val.values,                 cat_features=cat_indices)
+            model.fit(train_pool, eval_set=val_pool,
+                    early_stopping_rounds=50, verbose=False)
+
+        else:  # LOGISTIC
+            fit_params = {}
+            if w_train is not None:
+                fit_params["clf__sample_weight"] = w_train
+            model.fit(X_tr.values, y_tr.values, **fit_params)
 
     def _log_run(self, model_type, model, params, threshold, metrics, data, X_v, X_te):
         mlflow.log_params({**params,
@@ -1065,11 +1299,12 @@ class ModelTrainer:
 
         feat_names = (data.feature_names if model_type != ModelType.CATBOOST
                       else data.X_train_cat.columns.tolist())
+       
         fi = self.metrics.log_feature_importance(
-            model, model_type.value, feat_names, self.config.ARTIFACTS_DIR)
-        if fi:
-            mlflow.log_artifact(str(fi[0]))
-            mlflow.log_artifact(str(fi[1]))
+            model, model_type, data.X_train.columns.tolist()
+        )
+        if fi is not None and not fi.empty:
+            mlflow.log_text(fi.to_csv(index=False), "feature_importance.csv")
 
         X_for_shap = X_v if model_type != ModelType.CATBOOST else data.X_val_cat
         shap_path  = self.metrics.run_shap(model, X_for_shap, model_type,
