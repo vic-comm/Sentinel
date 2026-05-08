@@ -6,3 +6,5 @@ initial_models
 initial_models_2
 models*
 ray_results
+!data/*.dvc
+!data/.gitignore
