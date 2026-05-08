@@ -1,0 +1,34 @@
+============================================================
+ALCHEMY CRAWLER — Stage 1 (labeled training data)
+  Max wallets:    2000
+  Txns/wallet:    50
+  Concurrency:    20
+  Depth:          1 (confirmed labels only)
+============================================================
+Phase A: Collecting wallets from seed addresses...
+  tornado_cash_v2: 0 wallets found
+  tornado_cash: 125 wallets found
+  blender_io: 97 wallets found
+  aave_v2: 67 wallets found
+  uniswap_v2: 87 wallets found
+  uniswap_v3: 142 wallets found
+
+  Total wallets: 511 (216 fraud, 295 legit)
+
+Phase B: Crawling 511 wallets...
+  Progress: 100/511 (20%)
+  Progress: 200/511 (39%)
+  Progress: 300/511 (59%)
+  Progress: 400/511 (78%)
+  Progress: 500/511 (98%)
+
+  Saved 511 wallet seeds → data/processed/alchemy_wallet_seeds.parquet
+
+Results:
+  Total rows:  15,920
+  Fraud rows:  5,346 (33.6%)
+  Sources:     {'alchemy_uniswap_v3': 5104, 'alchemy_uniswap_v2': 3777, 'alchemy_tornado_cash': 3353, 'alchemy_blender_io': 1993, 'alchemy_aave_v2': 1693}
+
+Saved → data/processed/alchemy_transactions.parquet
+
+Next: python -m scripts.crawl_alchemy_graph

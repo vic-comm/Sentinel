@@ -1,0 +1,137 @@
+version: "3.9"
+
+networks:
+  sentinel_net:
+    driver: bridge
+
+volumes:
+  neo4j_data:
+  redis_data:
+  postgres_data:
+  postgres_mlflow_data:
+  mlflow_artifacts:
+  clickhouse_data:
+  prefect_data:
+
+services:
+  # ── Neo4j (graph database) ───────────────────────────────────────
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: sentinel_neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/sentinel_neo4j
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_pagecache_size: 2G
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - sentinel_net
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  # ── Redis (feature cache + GNN store + queue bus) ─────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel_redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    volumes:
+      - redis_data:/data
+    networks:
+      - sentinel_net
+
+  # ── PostgreSQL — app database ─────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: sentinel_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB:        sentinel
+      POSTGRES_USER:      sentinel
+      POSTGRES_PASSWORD:  sentinel
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - sentinel_net
+
+  # ── PostgreSQL — MLflow backend ───────────────────────────────────
+  postgres_mlflow:
+    image: postgres:15-alpine
+    container_name: sentinel_postgres_mlflow
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB:        mlflow
+      POSTGRES_USER:      mlflow
+      POSTGRES_PASSWORD:  mlflow_sentinel
+    volumes:
+      - postgres_mlflow_data:/var/lib/postgresql/data
+    networks:
+      - sentinel_net
+
+  # ── MLflow (experiment tracking + model registry) ─────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.1
+    container_name: sentinel_mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://mlflow:mlflow_sentinel@postgres_mlflow:5432/mlflow
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://mlflow:mlflow_sentinel@postgres_mlflow:5432/mlflow
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    networks:
+      - sentinel_net
+    depends_on:
+      - postgres_mlflow
+
+  # ── ClickHouse (OLAP analytics warehouse) ─────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1-alpine
+    container_name: sentinel_clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB:       sentinel
+      CLICKHOUSE_USER:     default
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - sentinel_net
+
+  # ── Prefect Server (MLOps orchestration UI) ───────────────────────
+  prefect:
+    image: prefecthq/prefect:2-python3.11
+    container_name: sentinel_prefect
+    ports:
+      - "4200:4200"
+    command: prefect server start --host 0.0.0.0
+    environment:
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_API_DATABASE_CONNECTION_URL: sqlite+aiosqlite:////prefect/prefect.db
+    volumes:
+      - prefect_data:/prefect
+    networks:
+      - sentinel_net

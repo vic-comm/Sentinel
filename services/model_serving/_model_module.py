@@ -63,7 +63,6 @@ MLFLOW_TRACKING_URI   = os.getenv("MLFLOW_TRACKING_URI", "./mlruns")
 DAGSHUB_TOKEN         = os.getenv("DAGSHUB_TOKEN", "")          # Personal access token
 DAGSHUB_USERNAME      = os.getenv("DAGSHUB_USERNAME", "")
 DAGSHUB_REPO          = os.getenv("DAGSHUB_REPO", "Sentinel")
-
 REGISTERED_MODEL_NAME = os.getenv("REGISTERED_MODEL_NAME", "sentinel-fraud-detection")
 MODELS_DIR            = Path(os.getenv("MODELS_DIR", "models"))
 
@@ -107,7 +106,7 @@ def _setup_mlflow_client() -> Optional[MlflowClient]:
 
     # DagsHub: set auth if token provided
     if "dagshub.com" in uri and DAGSHUB_TOKEN:
-        os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USERNAME or "token"
+        os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USERNAME
         os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
         log.info("MLflow → DagsHub (%s)", uri)
     elif uri == "./mlruns" or uri.startswith("/"):

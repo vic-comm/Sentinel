@@ -1,35 +1,3 @@
-# import pandas as pd
-# from pathlib import Path
-# def main():
-#     print("Loading enriched dataset...")
-#     df = pd.read_parquet("data/training/enriched_dataset.parquet")
-
-#     print("Sorting chronologically...")
-#     df = df.sort_values("timestamp").reset_index(drop=True)
-
-#     # Calculate split indices (80% Train, 10% Validation, 10% Test)
-#     n = len(df)
-#     train_end = int(n * 0.8)
-#     val_end = int(n * 0.9)
-
-#     print("Splitting data...")
-#     train_df = df.iloc[:train_end]
-#     val_df = df.iloc[train_end:val_end]
-#     test_df = df.iloc[val_end:]
-
-#     print("Saving final splits...")
-#     train_df.to_parquet("data/training/train.parquet", index=False)
-#     val_df.to_parquet("data/training/val.parquet", index=False)
-#     test_df.to_parquet("data/training/test.parquet", index=False)
-
-#     print(f"✅ Train: {len(train_df)} rows")
-#     print(f"✅ Val:   {len(val_df)} rows")
-#     print(f"✅ Test:  {len(test_df)} rows")
-#     print("Ready for ML Pipeline!")
-
-# if __name__ == '__main__':
-#     main()
-
 """
 scripts/split_data.py
 =====================

@@ -485,6 +485,21 @@ def main(attach_gnn: bool = False):
     print("\n[1/5] Loading train/val/test splits...")
     train, val, test = load_splits()
 
+    # The columns that must be dropped to prevent target leakage
+    leak_columns = [
+        "fraud_type",
+        "fraud_network_id",
+        "cross_modality_fraud_id",
+        "cross_modality_pattern",
+        "transaction_id",          # High cardinality identifier
+        "transaction_hash",        # High cardinality identifier
+        "linked_fiat_transaction"  # Only exists on fraudulent crypto legs
+    ]
+
+    # Drop them from all splits
+    for df in [train, val, test]:
+        df.drop(columns=[col for col in leak_columns if col in df.columns], inplace=True)
+        
     # ── 2. Graph features (degree-based) ──────────────────────────────────────
     # Compute on the FULL dataset first (so cross-split degree counts are correct),
     # then split back. This prevents train/val leakage of degree counts while
